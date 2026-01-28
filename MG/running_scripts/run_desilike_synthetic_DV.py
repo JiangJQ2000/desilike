@@ -31,7 +31,7 @@ from desilike.observables.galaxy_clustering import TracerPowerSpectrumMultipoles
 from desilike.observables import ObservableCovariance
 from desilike.likelihoods import ObservablesGaussianLikelihood
 
-from desilike.samplers import MCMCSampler
+from desilike.samplers import MCMCSampler, NUTSSampler, HMCSampler, NautilusSampler
 from desilike.profilers import MinuitProfiler
 
 try:
@@ -118,7 +118,6 @@ def add_or_update_param(
 
 def emu_filename(
     tag: str,
-    k: np.ndarray,
     ells: tuple[int, ...],
     beyond_eds: bool,
     redshift_bins: bool,
@@ -128,9 +127,6 @@ def emu_filename(
     scale_bins_method: str | None = None,
 ) -> str:
     """Match the old-script emulator naming logic (no cosmology/nuisance state embedded)."""
-    dk = float(np.median(np.diff(k))) if k.size > 1 else 0.0
-    kmin_edge = float(k.min() - 0.5 * dk)
-    kmax_edge = float(k.max() + 0.5 * dk)
 
     if redshift_bins and scale_bins:
         mode = "binning_zk"
@@ -151,9 +147,10 @@ def emu_filename(
 
     return (
         f"emu-fs_isitgr_fkptjax_folps_{mode}_{tag}"
-        f"_k{kmin_edge:.3f}-{kmax_edge:.3f}"
         f"_l{''.join(map(str, ells))}.npy"
     )
+
+
 
 
 # ============================================================================
@@ -165,7 +162,7 @@ def parse_args():
         "mirroring your OLD script's cosmology + nuisance settings."
     )
 
-    p.add_argument("--mode", choices=["mcmc", "emcee", "map"], default="mcmc")
+    p.add_argument("--mode", choices=["mcmc", "emcee", "map", 'NUTS', 'HMC', 'Nautilus'], default="mcmc")
 
     g = p.add_mutually_exclusive_group()
     g.add_argument("--create-emu", action="store_true", help="Build per-tracer emulators then exit.")
@@ -176,11 +173,10 @@ def parse_args():
     p.add_argument("--chains-dir", type=Path, default=Path("./chains"))
     p.add_argument("--chain-prefix", type=str, default="chain_fs_folps_isitgr_fkptjax")
 
-    # synthetic inputs
     p.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("/n/home12/cgarciaquintero/DESI/MG_validation/synthetic_noiseless/data_vectors/"),
+        default=Path("/home/users/jiangjq/projects/desi-y1-kp/desi_y1_cosmo_bindings/fs_bao_data"),
     )
     p.add_argument("--use-cov-x10", action="store_true")
     p.add_argument("--cov-scale", type=float, default=1.0)
@@ -227,6 +223,22 @@ def parse_args():
     p.add_argument("--nwalkers", type=str, default=None)
     p.add_argument("--emcee-max-iter", type=int, default=20000)
 
+    p.add_argument(
+        "--nuts-cov",
+        type=str,
+        default=None,
+        help="Covariance source for NUTS inverse mass matrix. "
+             "Use a path/glob to existing chain(s) or 'auto' to use existing chains for current prefix.",
+    )
+    p.add_argument("--nuts-cov-burnin", type=float, default=0.5)
+    p.add_argument(
+        "--nuts-adaptation",
+        choices=["auto", "true", "false"],
+        default="auto",
+        help="Warmup adaptation for NUTS. "
+             "'auto' disables adaptation when --nuts-cov is provided, else enables.",
+    )
+
     # MAP
     p.add_argument("--max-calls", type=int, default=int(1e5))
     p.add_argument("--gradient", action="store_true")
@@ -271,28 +283,85 @@ def main():
     if args.mg_variant == "binning" and not (args.redshift_bins or args.scale_bins):
         raise ValueError("--mg-variant binning requires --redshift-bins and/or --scale-bins")
 
+    fid = DESI()
     # APscaling requires h_fid (OLD behavior)
     h_fid_global: float | None = None
     if prior_basis == "APscaling":
         if args.h_fid is not None:
             h_fid_global = float(args.h_fid)
         else:
-            fid = DESI()
             try:
                 h_fid_global = float(getattr(fid, "h", fid["h"]))
             except Exception:
                 raise RuntimeError("Could not infer h_fid from DESI(); pass --h-fid explicitly.")
 
-    # Tracers (keep the b1/b2 refs you were using in the newer folps runner)
-    # (file_tag, tracer_tag, b1_fid, z_eff, b2_ref)
-    tracer_table = [
-        ("BGS",  "BGS",  1.5, 0.295, -0.52),
-        ("LRG1", "LRG1", 2.0, 0.510, -0.42),
-        ("LRG2", "LRG2", 2.1, 0.706, -0.36),
-        ("LRG3", "LRG3", 2.2, 0.934, -0.30),
-        ("ELG",  "ELG",  1.3, 1.321, -0.62),
-        ("QSO",  "QSO",  2.5, 1.484, -0.25),
-    ]
+
+    # ================================= Y1 =======================================
+    data_dir = args.data_dir
+    def dataset_fn(tracer, zrange, observable_name='power+bao-recon', data_name='', klim=None, covsyst='rotation-hod-photo'):
+        if data_name: data_name += '_'
+        if 'power' in observable_name:
+            observable_name += '_syst-{}'.format(covsyst)
+        if not any(name in observable_name for name in ['power', 'shapefit']): klim = None
+        if klim is None:
+            klim = ''
+        elif tuple(klim) == (0.02, 0.2):
+            klim = '_klim_0-0.02-0.20_2-0.02-0.20'
+        elif tuple(klim) == (0.02, 0.12):
+            klim = '_klim_0-0.02-0.12_2-0.02-0.12'
+        if observable_name == 'shapefit-joint':
+            klim = ''
+            observable_name = 'shapefit_power+bao-recon_syst-rotation-hod-photo'
+            return data_dir / f'covariance_{observable_name}{klim}_{tracer}_GCcomb_z{zrange[0]:.1f}-{zrange[1]:.1f}.npy'
+        return data_dir / f'{data_name}forfit_{observable_name}{klim}_{tracer}_GCcomb_z{zrange[0]:.1f}-{zrange[1]:.1f}.npy'
+
+    def get_tracer_label(tracer):
+        return tracer.split('_')[0].replace('+', 'plus')
+
+    def get_fit_setup(tracer, zrange=None, theory_name='velocileptors', return_list=None):
+
+        klim = {0: [0.02, 0.2, 0.005], 2: [0.02, 0.2, 0.005]} #, 4: [0.02, 0.1, 0.005]} # hexadecapole kmax
+        kin = np.arange(0.001, 0.35, 0.001)  # window range used for convolution
+        slim = {0: [30., 150., 4.], 2: [30., 150., 4.], 4: [40., 150., 4.]}
+        sin = None
+        iso = any(name in tracer for name in ['BGS', 'QSO'])
+        sigmapar, sigmaper, sigmas = None, None, None
+        if 'bao' in theory_name:
+            ells = (0,) if iso else (0, 2)
+            klim = {ell: [0.02, 0.3, 0.005] for ell in ells}
+            #slim = {ell: [50., 150., 4.] for ell in ells}
+            slim = {ell: [80., 130., 4.] for ell in ells}  # restricted s-range
+            sigmapar, sigmaper, sigmas = (6., 2.), (3., 1.), (2., 2.)
+            if 'BGS' in tracer:
+                sigmapar, sigmaper = (8., 2.), (3., 1.)
+
+        b1 = {'BGS': 1.5, 'LRG+ELG': 1.6, 'LRG': 2.0, 'ELG': 1.2, 'QSO': 2.1}
+        for tr, b in b1.items():
+            if tr in tracer:
+                b1 = b
+                break
+
+        di = {'sigmapar': sigmapar, 'sigmaper': sigmaper, 'sigmas': sigmas, 'b1': b1, 'klim': klim, 'slim': slim, 'kin': kin}
+        if return_list is None:
+            return di
+        return [di[name] for name in return_list]
+
+    list_zrange = [('BGS_BRIGHT-21.5', 0, (0.1, 0.4)), ('LRG', 0, (0.4, 0.6)), ('LRG', 1, (0.6, 0.8)), ('LRG', 2, (0.8, 1.1)), ('ELG_LOPnotqso', 1, (1.1, 1.6)), ('QSO', 0, (0.8, 2.1)), ('Lya', 0, (1.8, 4.2))]
+
+    # From desi_fs_bao_all
+    tracers = None
+    klim = (0.02, 0.2)
+    observable_name = 'power'
+    data_name = ''
+    covsyst='rotation-hod-photo'
+
+    this_zrange = []
+    for tracer, iz, zrange in list_zrange:
+        tracer_label = get_tracer_label(tracer)
+        namespace = '{tracer}_z{iz}'.format(tracer=tracer_label, iz=iz)
+        if tracers is not None and namespace.lower() not in tracers: continue
+        #if 'lrg_z0' not in namespace.lower(): continue
+        this_zrange.append((tracer, iz, zrange, namespace))
 
     # ---------- Build prefix (similar spirit to OLD script) ----------
     prefix = args.chain_prefix
@@ -459,50 +528,15 @@ def main():
     # -----------------------------
     # Loop over tracers
     # -----------------------------
-    for file_tag, tracer_tag, b1_fid, z_eff, b2_ref in tracer_table:
-        namespace = file_tag.lower()
-
-        fid_model = str(args.fid_model)
-        k_path = args.data_dir / f"{file_tag}_{fid_model}_k.txt"
-        p_path = args.data_dir / f"{file_tag}_{fid_model}_P0P2P4.txt"
-        c_suffix = "_cov_x10.txt" if args.use_cov_x10 else "_cov.txt"
-        c_path = args.data_dir / f"{file_tag}_{fid_model}{c_suffix}"
-
-        if not k_path.exists() or not p_path.exists() or not c_path.exists():
-            raise FileNotFoundError(
-                f"[{file_tag}] Missing synthetic inputs:\n"
-                f"  k:   {k_path}\n"
-                f"  P:   {p_path}\n"
-                f"  cov: {c_path}\n"
-            )
-
-        k_all = np.loadtxt(k_path)
-        P_all = np.loadtxt(p_path)
-        cov_all = np.loadtxt(c_path)
-
-        Nk_file = k_all.size
-        if P_all.size != 3 * Nk_file:
-            raise ValueError(
-                f"[{file_tag}] Expected P size = 3*Nk = {3*Nk_file}, got {P_all.size}. "
-                "This script assumes P file is stacked by ell blocks: P0 then P2 then P4."
-            )
-        if cov_all.shape != (P_all.size, P_all.size):
-            raise ValueError(f"[{file_tag}] cov shape {cov_all.shape} incompatible with P size {P_all.size}")
-
-        if args.cov_scale != 1.0:
-            cov_all = float(args.cov_scale) * cov_all
-
-        present_ells_data = (0, 2, 4)
-
-        start = int(np.searchsorted(k_all, float(args.kmin_cut), side="left"))
-        stop = int(np.searchsorted(k_all, float(args.kmax_cut), side="right"))
-        Ncut = stop - start
-        if Ncut <= 0:
-            raise RuntimeError(f"[{file_tag}] k cuts removed all bins.")
-
-        k_out = k_all[start:stop]
-        data_vec, cov_mat = select_data_and_cov(P_all, cov_all, present_ells_data, ells, start, Ncut)
-
+    for tracer, iz, zrange, namespace in this_zrange:
+        # ------- Y1 -------
+        if 'Lya' in tracer: continue
+        data = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name='', klim=klim)).observables(observables='power')
+        b1_fid, = get_fit_setup(tracer, zrange=zrange, return_list=['b1'])
+        b2_ref = 0. # Y1
+        z_eff = data.attrs['zeff']
+        file_tag = namespace
+        
         # -----------------------------
         # Build template + theory
         # -----------------------------
@@ -516,9 +550,9 @@ def main():
         init_kwargs = dict(
             freedom=args.freedom,
             prior_basis=prior_basis,
-            tracer=tracer_tag,
+            tracer=tracer,
             template=template,
-            k=k_out,
+            k=data.attrs['kin'],
             ells=list(ells),
             b3_coev=True,
             model="HDKI",
@@ -526,12 +560,17 @@ def main():
             beyond_eds=bool(args.beyond_eds),
             rescale_PS=RESCALE_PS,
             shotnoise=1e4,
+            mock_type='Y1',
         )
         # Match OLD: APscaling passes h_fid, and nuisance mapping handled internally
         if prior_basis == "APscaling":
             init_kwargs["h_fid"] = float(h_fid_global) if h_fid_global is not None else float(args.h_fid)
         # Keep b1_fid as a stable ref for your physical/folps usage (harmless for standard too)
         init_kwargs["b1_fid"] = float(b1_fid)
+
+        init_kwargs['sigma8_ref'] = float(fid.sigma8_z(z_eff))
+        if MPI.COMM_WORLD.rank == 0:
+            print(f"{namespace}\t{z_eff=}\tsigma8_ref = {init_kwargs['sigma8_ref']}")
 
         theory.init.update(**init_kwargs)
 
@@ -540,7 +579,6 @@ def main():
         # -----------------------------
         emu_path = args.emu_dir / emu_filename(
             tag=file_tag,
-            k=k_out,
             ells=ells,
             beyond_eds=bool(args.beyond_eds),
             redshift_bins=bool(args.redshift_bins),
@@ -549,35 +587,6 @@ def main():
             kc=float(args.kc),
             scale_bins_method=str(args.scale_bins_method),
         )
-
-        if args.create_emu and rank == 0:
-            if emu_path.exists():
-                print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
-            else:
-                print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
-                _ = theory.pt()  # force build
-                emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order))
-                emu = Emulator(theory.pt, engine=emu_engine)
-                emu.set_samples()
-                emu.fit()
-                emu.save(str(emu_path))
-                print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
-
-        if args.use_emu:
-            if rank == 0 and not emu_path.exists():
-                raise FileNotFoundError(f"[Emulator] Missing {emu_path} for {file_tag}. Run with --create-emu.")
-            comm.Barrier()
-
-            emu_loaded = EmulatedCalculator.load(str(emu_path))
-
-            # important: share cosmology params into emulator init (as you did before)
-            for p in cosmo.init.params:
-                if p in emu_loaded.init.params:
-                    emu_loaded.init.params.set(p)
-
-            theory.init.update(pt=emu_loaded)
-            if rank == 0:
-                print(f"[{file_tag}] PT backend:", type(theory.pt).__name__)
 
         # -----------------------------
         # Nuisance param namespacing + alpha analytic marginalization (MATCH OLD SCRIPT)
@@ -620,13 +629,44 @@ def main():
         # Observable + covariance
         # -----------------------------
         observable = TracerPowerSpectrumMultipolesObservable(
-            data=data_vec,
+            data=data,
             theory=theory,
-            k=[k_out for _ in ells],   # tells desilike how to split data_vec
             ells=list(ells),
+            wmatrix=data.attrs['wmatrix'], kin=data.attrs['kin'], ellsin=data.attrs['ellsin'], wshotnoise=data.attrs['wshotnoise'],
         )
-        covmeta = [{"name": "PowerSpectrumMultipoles", "x": [k_out] * len(ells), "projs": list(ells)}]
-        covariance = ObservableCovariance(cov_mat, observables=covmeta)
+
+        # emu on observable.wmatrix.theory, following Y1 pipeline, otherwise ell range is incorrect.
+        if args.create_emu and rank == 0:
+            if emu_path.exists():
+                print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
+            else:
+                print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
+                theory = observable.wmatrix.theory
+                _ = theory.pt()  # force build
+                emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order))
+                emu = Emulator(theory.pt, engine=emu_engine)
+                emu.set_samples()
+                emu.fit()
+                emu.save(str(emu_path))
+                print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
+
+        if args.use_emu:
+            if rank == 0 and not emu_path.exists():
+                raise FileNotFoundError(f"[Emulator] Missing {emu_path} for {file_tag}. Run with --create-emu.")
+            comm.Barrier()
+
+            emu_loaded = EmulatedCalculator.load(str(emu_path))
+
+            # important: share cosmology params into emulator init (as you did before)
+            for p in cosmo.init.params:
+                if p in emu_loaded.init.params:
+                    emu_loaded.init.params.set(p)
+
+            theory.init.update(pt=emu_loaded)
+            if rank == 0:
+                print(f"[{file_tag}] PT backend:", type(theory.pt).__name__)
+        
+        covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
         lk = ObservablesGaussianLikelihood(observables=[observable], covariance=covariance, name=namespace)
         likelihoods.append(lk)
@@ -669,6 +709,99 @@ def main():
             ref_scale=args.ref_scale,
         )
         sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
+
+    if args.mode == "NUTS":
+        if args.resume:
+            existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
+            existing = [f for f in existing if "profiles" not in Path(f).stem]
+            chains_arg = existing if existing else args.nchains
+            if rank == 0:
+                if existing:
+                    print(f"[resume/NUTS] Resuming {len(existing)} chains")
+                else:
+                    print(f"[resume/NUTS] No existing files found; starting {args.nchains} chains")
+        else:
+            chains_arg = args.nchains
+
+        nuts_cov = None
+        if args.nuts_cov:
+            if args.nuts_cov == "auto":
+                cov_files = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
+                cov_files = [f for f in cov_files if "profiles" not in Path(f).stem]
+                if not cov_files:
+                    raise FileNotFoundError(
+                        f"[NUTS] --nuts-cov auto requested, but no chains found for prefix {prefix!r} "
+                        f"in {args.chains_dir}"
+                    )
+                cov_source = cov_files
+            else:
+                cov_source = args.nuts_cov
+            nuts_cov = {"source": cov_source, "burnin": float(args.nuts_cov_burnin)}
+
+        if args.nuts_adaptation == "true":
+            nuts_adaptation = True
+        elif args.nuts_adaptation == "false":
+            nuts_adaptation = False
+        else:
+            nuts_adaptation = False if nuts_cov is not None else True
+
+        sampler = NUTSSampler(
+            likelihood,
+            chains=chains_arg,
+            seed=42,
+            save_fn=save_pattern,
+            mpicomm=MPI.COMM_WORLD,
+            ref_scale=args.ref_scale,
+            covariance=nuts_cov,
+            adaptation=nuts_adaptation,
+        )
+        sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
+
+    if args.mode == "HMC":
+        if args.resume:
+            existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
+            existing = [f for f in existing if "profiles" not in Path(f).stem]
+            chains_arg = existing if existing else args.nchains
+            if rank == 0:
+                if existing:
+                    print(f"[resume/HMC] Resuming {len(existing)} chains")
+                else:
+                    print(f"[resume/HMC] No existing files found; starting {args.nchains} chains")
+        else:
+            chains_arg = args.nchains
+
+        sampler = HMCSampler(
+            likelihood,
+            chains=chains_arg,
+            seed=42,
+            save_fn=save_pattern,
+            mpicomm=MPI.COMM_WORLD,
+            ref_scale=args.ref_scale,
+        )
+        sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
+
+    if args.mode == "Nautilus":
+        if args.resume:
+            existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
+            existing = [f for f in existing if "profiles" not in Path(f).stem]
+            chains_arg = existing if existing else args.nchains
+            if rank == 0:
+                if existing:
+                    print(f"[resume/Nautilus] Resuming {len(existing)} chains")
+                else:
+                    print(f"[resume/Nautilus] No existing files found; starting {args.nchains} chains")
+        else:
+            chains_arg = args.nchains
+
+        sampler = NautilusSampler(
+            likelihood,
+            chains=chains_arg,
+            seed=42,
+            save_fn=save_pattern,
+            mpicomm=MPI.COMM_WORLD,
+            ref_scale=args.ref_scale,
+        )
+        sampler.run(verbose=True)
 
     elif args.mode == "emcee":
         if EmceeSampler is None:
