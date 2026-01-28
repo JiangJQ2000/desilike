@@ -944,6 +944,24 @@ class BaseVelocileptorsPowerSpectrumMultipoles(BasePTPowerSpectrumMultipoles, Ba
                 state[name] = getattr(self.pt, name)
         return state
 
+
+def get_physical_stochastic_settings(tracer=None):
+    if tracer is not None:
+        tracer = str(tracer).upper()
+        # Mark Maus, Ruiyang Zhao
+        settings = {'BGS': {'fsat': 0.15, 'sigv': 150*(10)**(1/3)*(1+0.2)**(1/2)/70.},
+                    'LRG': {'fsat': 0.15, 'sigv': 150*(10)**(1/3)*(1+0.8)**(1/2)/70.},
+                    'ELG': {'fsat': 0.10, 'sigv': 150*2.1**(1/2)/70.},
+                    'QSO': {'fsat': 0.03, 'sigv': 150*(10)**(0.7/3)*(2.4)**(1/2)/70.}}
+        try:
+            settings = settings[tracer]
+        except KeyError:
+            raise ValueError('unknown tracer: {}, please use any of {}'.format(tracer, list(settings.keys())))
+    else:
+        settings = {'fsat': 0.1, 'sigv': 5.}
+    return settings
+
+
 class BaseVelocileptorsTracerPowerSpectrumMultipoles(BaseTracerPowerSpectrumMultipoles):
 
     """Base class for velocileptors-based tracer power spectrum multipoles."""
@@ -2828,12 +2846,19 @@ class fkptTracerPowerSpectrumMultipoles(BaseTracerPowerSpectrumMultipoles):
                 self.required_bias_params[name + 'p'] = self.required_bias_params.pop(name)
 
             # NEW: fsat + sigv from tables (fsat depends on mock_type; sigv from tracer-type formula)
-            ms = fkptTracerPowerSpectrumMultipoles._get_mock_settings(tracer=self.options["tracer"],
-                                         mock_type=self.options.get("mock_type", "cutsky"))
-            if self.options.get("fsat", None) is None:
-                self.options["fsat"] = ms["fsat"]
-            if self.options.get("sigv", None) is None:
-                self.options["sigv"] = ms["sigv"]
+            if self.options.get("mock_type") == 'Y1':
+                _physical_stochastic_settings = get_physical_stochastic_settings(self.options["tracer"][:3])
+                if self.options.get("fsat", None) is None:
+                    self.options["fsat"] = _physical_stochastic_settings["fsat"]
+                if self.options.get("sigv", None) is None:
+                    self.options["sigv"] = _physical_stochastic_settings['sigv']
+            else:
+                ms = fkptTracerPowerSpectrumMultipoles._get_mock_settings(tracer=self.options["tracer"],
+                                            mock_type=self.options.get("mock_type", "cutsky"))
+                if self.options.get("fsat", None) is None:
+                    self.options["fsat"] = ms["fsat"]
+                if self.options.get("sigv", None) is None:
+                    self.options["sigv"] = ms["sigv"]
 
             if self.mpicomm.rank == 0:
                 self.log_debug('Using fsat, sigv = {:.3f}, {:.3f}.'.format(self.options['fsat'], self.options['sigv']))
