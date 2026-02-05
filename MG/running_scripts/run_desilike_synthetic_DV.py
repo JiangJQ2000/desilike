@@ -31,8 +31,9 @@ from desilike.observables.galaxy_clustering import TracerPowerSpectrumMultipoles
 from desilike.observables import ObservableCovariance
 from desilike.likelihoods import ObservablesGaussianLikelihood
 
-from desilike.samplers import MCMCSampler, NUTSSampler, HMCSampler, NautilusSampler
+from desilike.samplers import MCMCSampler, NUTSSampler, HMCSampler, NautilusSampler, ImportanceSampler
 from desilike.profilers import MinuitProfiler
+from desilike.samples import Chain
 
 try:
     from desilike.samplers import EmceeSampler
@@ -239,6 +240,11 @@ def parse_args():
         help="Warmup adaptation for NUTS. "
              "'auto' disables adaptation when --nuts-cov is provided, else enables.",
     )
+
+    # importance sampling
+    p.add_argument("--importance", action="store_true", help="Run importance sampling to reweight chains.")
+    p.add_argument("--importance-thin", type=int, default=1, help="Thin factor before importance sampling.")
+    p.add_argument("--importance-suffix", type=str, default="imp", help="Suffix for importance-sampled chains.")
 
     # MAP
     p.add_argument("--max-calls", type=int, default=int(1e5))
@@ -525,6 +531,8 @@ def main():
         raise ValueError(f"Unknown mg-variant {args.mg_variant!r}")
 
     likelihoods = []
+    pt_backups = []
+    use_emu_runtime = args.use_emu and not args.importance
 
     # -----------------------------
     # Loop over tracers
@@ -651,7 +659,10 @@ def main():
                 emu.save(str(emu_path))
                 print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
 
-        if args.use_emu:
+        if use_emu_runtime:
+            if args.importance:
+                pt_backups.append((theory, theory.pt))
+
             if rank == 0 and not emu_path.exists():
                 raise FileNotFoundError(f"[Emulator] Missing {emu_path} for {file_tag}. Run with --create-emu.")
             comm.Barrier()
@@ -666,7 +677,7 @@ def main():
             theory.init.update(pt=emu_loaded)
             if rank == 0:
                 print(f"[{file_tag}] PT backend:", type(theory.pt).__name__)
-        
+    
         covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
         lk = ObservablesGaussianLikelihood(observables=[observable], covariance=covariance, name=namespace)
@@ -675,6 +686,7 @@ def main():
         if rank == 0:
             print(f"[{file_tag}] appended likelihood (namespace={namespace})")
 
+
     if args.create_emu:
         comm.Barrier()
         if rank == 0:
@@ -682,6 +694,73 @@ def main():
         return
 
     likelihood = sum(likelihoods)
+
+    # -----------------------------
+    # Importance sampling only (optional)
+    # -----------------------------
+    if args.importance:
+        if args.importance_thin < 1:
+            raise ValueError("--importance-thin must be >= 1")
+
+        if args.use_emu and pt_backups:
+            if rank == 0:
+                print("[Importance] Disabling emulator for reweighting")
+            for theory, pt in pt_backups:
+                theory.init.update(pt=pt)
+        likelihood_imp = likelihood
+
+        chains_for_imp = None
+        if rank == 0:
+            pattern = args.chains_dir / f"{prefix}_*.npy"
+            fns = sorted(glob(str(pattern)))
+            fns = [f for f in fns if "profiles" not in Path(f).stem]
+            if not fns:
+                raise FileNotFoundError(f"[Importance] No chains found for prefix {prefix!r} in {args.chains_dir}")
+            chains_for_imp = [Chain.load(fn) for fn in fns]
+            if args.importance_thin > 1:
+                sizes_before = [c.size for c in chains_for_imp]
+                chains_for_imp = [c[::args.importance_thin] for c in chains_for_imp]
+                sizes_after = [c.size for c in chains_for_imp]
+                print(f"[Importance] Thin factor {args.importance_thin}: {sizes_before} -> {sizes_after}")
+
+        imp_pattern = str(args.chains_dir / f"{prefix}_{args.importance_suffix}_*.npy")
+        imp_sampler = ImportanceSampler(
+            likelihood_imp,
+            chains=chains_for_imp,
+            save_fn=imp_pattern,
+            mpicomm=MPI.COMM_WORLD,
+        )
+        imp_chains = imp_sampler.run(subtract_input=True)
+
+        if rank == 0:
+            def _ess(weights: np.ndarray) -> float:
+                weights = weights[np.isfinite(weights)]
+                if weights.size == 0:
+                    return 0.0
+                sw = float(weights.sum())
+                if sw <= 0.0:
+                    return 0.0
+                sw2 = float(np.sum(weights ** 2))
+                if sw2 <= 0.0:
+                    return 0.0
+                return sw * sw / sw2
+
+            all_weights = []
+            for ichain, chain in enumerate(imp_chains):
+                if chain is None:
+                    continue
+                w = np.asarray(chain.weight).ravel().astype("f8")
+                all_weights.append(w)
+                ess = _ess(w)
+                frac = ess / chain.size if chain.size else 0.0
+                print(f"[Importance] chain {ichain}: N={chain.size}, ESS={ess:.1f} ({frac:.3f})")
+            if all_weights:
+                w_all = np.concatenate(all_weights)
+                ess_all = _ess(w_all)
+                frac_all = ess_all / w_all.size if w_all.size else 0.0
+                print(f"[Importance] total: N={w_all.size}, ESS={ess_all:.1f} ({frac_all:.3f})")
+
+        return
 
     # -----------------------------
     # Run
@@ -711,7 +790,7 @@ def main():
         )
         sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
 
-    if args.mode == "NUTS":
+    elif args.mode == "NUTS":
         if args.resume:
             existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
             existing = [f for f in existing if "profiles" not in Path(f).stem]
@@ -758,7 +837,7 @@ def main():
         )
         sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
 
-    if args.mode == "HMC":
+    elif args.mode == "HMC":
         if args.resume:
             existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
             existing = [f for f in existing if "profiles" not in Path(f).stem]
@@ -781,7 +860,7 @@ def main():
         )
         sampler.run(check={"max_eigen_gr": 0.01}, check_every=args.check_every, max_iterations=args.max_iter)
 
-    if args.mode == "Nautilus":
+    elif args.mode == "Nautilus":
         if args.resume:
             existing = sorted(glob(str(args.chains_dir / f"{prefix}_*.npy")))
             existing = [f for f in existing if "profiles" not in Path(f).stem]
