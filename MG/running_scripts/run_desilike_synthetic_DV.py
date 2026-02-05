@@ -169,6 +169,7 @@ def parse_args():
     g.add_argument("--use-emu", action="store_true", help="Load and use per-tracer emulators.")
     p.add_argument("--emu-dir", type=Path, default=Path("./emulators"), help="Directory for emulator files.")
     p.add_argument("--emu-order", type=int, default=6, help="Taylor emulator order (finite).")
+    p.add_argument("--emu-scale", type=float, default=1.0, help="Taylor emulator scale (finite).")
 
     p.add_argument("--chains-dir", type=Path, default=Path("./chains"))
     p.add_argument("--chain-prefix", type=str, default="chain_fs_folps_isitgr_fkptjax")
@@ -643,7 +644,7 @@ def main():
                 print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
                 theory = observable.wmatrix.theory
                 _ = theory.pt()  # force build
-                emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order))
+                emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order), delta_scale=float(args.emu_scale))
                 emu = Emulator(theory.pt, engine=emu_engine)
                 emu.set_samples()
                 emu.fit()
