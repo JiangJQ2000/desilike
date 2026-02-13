@@ -2807,6 +2807,18 @@ class fkptTracerPowerSpectrumMultipoles(BaseTracerPowerSpectrumMultipoles):
                 if not param.fixed:
                     param.update(prior=dict(dist='norm', loc=0.0, scale=width_SN2),
                                  ref=dict(dist='norm', loc=0.0, scale=1.0))
+            
+            if pb == 'physical_velocileptors':
+                for param in params.select(basename='b1p'):
+                    param.update(prior=dict(dist='uniform', limits=[0., 3.]),
+                                ref=dict(dist='norm', loc=1.0, scale=0.1))
+                
+                for param in params.select(basename=['b2p', 'bs2p']):
+                    param.update(prior=dict(dist='norm', loc=0.0, scale=5.),
+                            ref=dict(dist='norm', loc=0.0, scale=1.0))
+
+                for param in params.select(basename='b3nlp'):
+                    param.update(value=0.0, fixed=True, prior=None)
 
         return params
 
@@ -2950,6 +2962,15 @@ class fkptTracerPowerSpectrumMultipoles(BaseTracerPowerSpectrumMultipoles):
             # proceed with biases
             b1E = params['b1p'] / (S * sqrtA_AP)
             b2E = params['b2p'] / (S**2 * sqrtA_AP)
+        elif pb == 'physical_velocileptors':
+            b1L = params['b1p'] / sigma8 - 1.
+            b2L = params['b2p'] / sigma8**2
+            bsL = params['bs2p'] / sigma8**2 
+            b3L = params['b3nlp']
+            b1E = 1. + b1L
+            b2E = (8. / 21. * b1L + b2L) # 8/21*b1L exist in FOLPS & REPTvelocileptors ?
+            bs2E = bsL
+            b3E = b3L
         else:
             b1E = params['b1p'] / sigma8
             b2E = params['b2p'] / sigma8**2
