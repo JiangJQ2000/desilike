@@ -153,6 +153,260 @@ def emu_filename(
 
 
 
+###################### plot script adapted from https://github.com/cosmodesi/desi-y1-kp/blob/main/scripts/y1kp7_key_paper_2/kp5.ipynb
+
+def plot_spectrum(new_likelihoods: ObservablesGaussianLikelihood):
+    import os
+    from pathlib import Path
+    import numpy as np
+    import matplotlib
+    from matplotlib import pyplot as plt
+    import getdist
+    from getdist import plots, loadMCSamples
+    import matplotlib.ticker as plticker
+    from pprint import pp
+
+    import sys # Adjust to your case!
+    sys.path.insert(1, str(Path(__file__).parent.parent.parent.parent / 'desi-y1-kp/'))
+    sys.path.insert(1, str(Path(__file__).parent.parent.parent.parent / 'desi-y1-kp/scripts/'))
+
+    from y1_fs_cosmo_tools import load_cobaya_samples, load_desilike_samples
+    from y1_bao_cosmo_tools import load_cobaya_samples as load_cobaya_bao_samples
+    from desi_y1_plotting import KP7StylePaper, utils
+
+    style = KP7StylePaper()
+    matplotlib.rcParams["text.usetex"] = False
+
+    getdist_2D_width_inch = 5
+    getdist_2D_ratio = 1 / 1.2
+
+    # ------------------------ #
+
+    style.settings.legend_frame = True
+    def white_legend(legend):
+        legend.get_frame().set_facecolor('white')
+        legend.get_frame().set_edgecolor('white')
+        legend.get_frame().set_alpha(1.)
+
+    outdir = Path('./plots_v2_talk/')
+    outdir.mkdir(exist_ok=True)
+    ext = 'pdf'
+
+    from cosmoprimo.fiducial import DESI
+
+    fid = DESI()
+    markers = {}
+    for name in ['H0', 'logA', 'omega_b', 'omega_cdm', 'Omega_m', 'n_s']:
+        markers[name] = fid[name]
+    markers['sigma8_m'] = fid.get_fourier().sigma8_m
+    markers['S8'] = markers['sigma8_m'] * (markers['Omega_m'] / 0.3)**0.5
+
+
+    # To set up desilike likelihoods
+    # Go to ../../desi_y1_cosmo_bindings
+    # python bindings_fs_bao.py --todo copy
+
+    from y1_fs_cosmo_tools import get_desilike_cosmo, get_desilike_likelihoods
+
+    tracers = ['BGS', 'LRG-z0', 'LRG-z1', 'LRG-z2', 'ELG', 'QSO', 'ALL']
+    tracer_alias = {'LRG-z0': 'LRG1', 'LRG-z1': 'LRG2', 'LRG-z2': 'LRG3'}
+
+    from desilike import plotting
+
+    colors = [style.colors.get(tracer, 'k') for tracer in tracers]
+    colors[1] = style.colors['LRG', (0.4, 0.6)]
+    colors[2] = style.colors['LRG', (0.6, 0.8)]
+    colors[3] = style.colors['LRG', (0.8, 1.1)]
+
+    """
+    for tracer, color in zip(tracers, colors):
+        model = 'base'
+        theory = 'camb'
+        dataset = ['desi-reptvelocileptors-fs-bao-{}'.format(tracer.lower()), 'schoneberg2024-bbn', 'planck2018-ns10']
+        profiles = load_desilike_samples(model=model, theory=theory, sampler='minuit', emulator_fn=False, dataset=dataset)
+        print(profiles.to_stats(tablefmt='pretty'))
+        #profiles_emu = load_desilike_samples(model=model, theory=theory, sampler='minuit', emulator_fn=True, dataset=dataset)
+        #print(profiles_emu.to_stats(tablefmt='pretty'))
+        cosmo = get_desilike_cosmo(model=model, engine=theory, dataset=dataset)
+
+        for covsyst in ['hod-photo', 'rotation-hod-photo']:
+            likelihood = get_desilike_likelihoods(dataset=dataset, cosmo=cosmo, emulator_fn=False, covsyst=covsyst, solve='.best', jit=False)[0] #'.best')
+            params = profiles.bestfit.choice(input=True, index='argmax')
+            logpost, derived = likelihood(params, return_derived=True)
+            # derived contains best-fit nuisance parameters
+            for name in derived.names(solved=True): params[name] = float(derived[name])
+            likelihood(params)
+            
+            def plot(fn):
+                observable = likelihood.observables[0]
+                fig = observable.plot()
+                fig.axes[0].legend(fontsize=16, loc='upper right', ncols=1)
+                frame = fig.axes[0].get_legend().get_frame()
+                frame.set_facecolor('white')
+                frame.set_edgecolor('white')
+                frame.set_alpha(0.)
+                plt.savefig(fn, bbox_inches='tight', dpi=360)
+
+            fn = outdir / 'pk_{}_{}.{}'.format(tracer, covsyst, ext)
+            plot(fn)
+    """
+
+    @plotting.plotter()
+    def my_plot(self, scaling='kpk', color='C0', show_legend=True, kw_theory=None, fig=None):
+        """
+        Plot data and theory power spectrum multipoles.
+
+        Parameters
+        ----------
+        scaling : str, default='kpk'
+            Either 'kpk' or 'loglog'.
+
+        kw_theory : list of dict, default=None
+            Change the default line parametrization of the theory, one dictionary for each ell or duplicate it.
+
+        fig : matplotlib.figure.Figure, default=None
+            Optionally, a figure with at least ``1 + len(self.ells)`` axes.
+
+        fn : str, Path, default=None
+            Optionally, path where to save figure.
+            If not provided, figure is not saved.
+
+        kw_save : dict, default=None
+            Optionally, arguments for :meth:`matplotlib.figure.Figure.savefig`.
+
+        show : bool, default=False
+            If ``True``, show figure.
+
+        interactive : bool, default=False
+            If ``True``, use interactive interface provided by ipywidgets.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        """
+        from matplotlib import pyplot as plt
+
+        if kw_theory is None:
+            kw_theory = {}
+        if isinstance(kw_theory, dict):
+            kw_theory = [kw_theory]
+        if len(kw_theory) != len(self.ells):
+            kw_theory = [{key: value for key, value in kw_theory[0].items() if (key != 'label') or (ill == 0)} for ill in range(len(self.ells))]
+        kw_theory = [{'color': color, **kw} for ill, kw in enumerate(kw_theory)]
+
+        if fig is None:
+            height_ratios = [max(len(self.ells), 3)] + [1] * len(self.ells)
+            figsize = (6, 1.5 * sum(height_ratios))
+            fig, lax = plt.subplots(len(height_ratios), sharex=True, sharey=False, gridspec_kw={'height_ratios': height_ratios}, figsize=figsize, squeeze=True)
+            fig.subplots_adjust(hspace=0.1)
+        else:
+            lax = fig.axes
+
+        data, theory, std = self.data, self.theory, self.std
+        k_exp = 1 if scaling == 'kpk' else 0
+
+        for ill, ell in enumerate(self.ells):
+            lax[0].errorbar(self.k[ill], self.k[ill]**k_exp * data[ill], yerr=self.k[ill]**k_exp * std[ill], color=color, linestyle='none', marker='o', label=r'$\ell = {:d}$'.format(ell))
+            lax[0].plot(self.k[ill], self.k[ill]**k_exp * theory[ill], **kw_theory[ill])
+        for ill, ell in enumerate(self.ells):
+            lax[ill + 1].plot(self.k[ill], (data[ill] - theory[ill]) / std[ill], **kw_theory[ill])
+            lax[ill + 1].set_ylim(-4, 4)
+            for offset in [-2., 2.]: lax[ill + 1].axhline(offset, color='k', linestyle='--')
+            lax[ill + 1].set_ylabel(r'$\Delta P_{{{0:d}}} / \sigma_{{ P_{{{0:d}}} }}$'.format(ell))
+        for ax in lax[1:]: ax.grid(True)
+        if show_legend: lax[0].legend()
+        if scaling == 'kpk':
+            lax[0].set_ylabel(r'$k P_{\ell}(k)$ [$(\mathrm{Mpc}/h)^{2}$]')
+        if scaling == 'loglog':
+            lax[0].set_ylabel(r'$P_{\ell}(k)$ [$(\mathrm{Mpc}/h)^{3}$]')
+            lax[0].set_yscale('log')
+            lax[0].set_xscale('log')
+        lax[-1].set_xlabel(r'$k$ [$h/\mathrm{Mpc}$]')
+        return fig
+
+    for tracer, color, new_likelihood in zip(tracers, colors, new_likelihoods):
+        model = 'base'
+        theory = 'camb'
+        #dataset = ['desi-reptvelocileptors-fs-bao-{}'.format(tracer.lower()), 'schoneberg2024-bbn', 'planck2018-ns10']
+        #profiles = load_desilike_samples(model=model, theory=theory, run='run3c', sampler='minuit', emulator_fn=False, dataset=dataset)
+        #print(profiles.to_stats(tablefmt='pretty'))
+        
+        dataset = ['desi-reptvelocileptors-fs-{}'.format(tracer.lower()), 'schoneberg2024-bbn', 'planck2018-ns10']
+        profiles = load_desilike_samples(model=model, theory=theory, run='run4', sampler='minuit', emulator_fn=False, dataset=dataset)
+
+        if tracer == 'ALL': continue
+        cosmo = get_desilike_cosmo(model=model, engine=theory, dataset=dataset)
+
+        for covsyst in ['rotation-hod-photo']:
+            likelihood = get_desilike_likelihoods(dataset=dataset, cosmo=cosmo, emulator_fn=False, covsyst=covsyst, solve='.best', jit=False)[0] #'.best')
+            params = profiles.bestfit.choice(input=True, index='argmax')
+
+            pp(params)
+            
+            
+            logpost, derived = likelihood(params, return_derived=True)
+            # derived contains best-fit nuisance parameters
+            for name in derived.names(solved=True): params[name] = float(derived[name])
+            pp(params)
+            likelihood(params)
+
+            params['h'] = params.pop('H0') / 100
+
+            # Temporary: direct key conversion for quick comparison tests.
+            for param in list(params.copy()):
+                if param.endswith('.bsp'):
+                    params[param[:-4] + '.bs2p'] = params.pop(param)
+                elif param.endswith('.b3p'):
+                    params[param[:-4] + '.b3nlp'] = params.pop(param)
+                if param.endswith('.alpha6p'):
+                    params.pop(param)
+                elif param.endswith('.sn0p'):
+                    params[param[:-5] + '.alpha0shotp'] = params.pop(param)
+                elif param.endswith('.sn2p'):
+                    params[param[:-5] + '.alpha2shotp'] = params.pop(param)
+                elif param.endswith('.sn4p'):
+                    params.pop(param)
+                elif param.endswith('.rotation_0'):
+                    params.pop(param)
+                elif param.endswith('.rotation_1'):
+                    params.pop(param)
+                elif param.endswith('.photo_0'):
+                    params.pop(param)
+            
+            params['mu0'] = 0.
+
+            pp(new_likelihood.varied_params)
+            logpost, derived = new_likelihood(params, return_derived=True)
+            for name in derived.names(solved=True): params[name] = float(derived[name])
+            pp({k: float(v) for (k,v) in params.items()})
+            new_likelihood(params)
+            
+            def plot(fn):
+                observable = likelihood.observables[0]
+                fig = my_plot(observable, color=color, show_legend=False)
+                fig = my_plot(new_likelihood.observables[0], color=color, show_legend=False, kw_theory={'ls': '--'}, fig=fig)
+                ax = fig.axes[0]
+                """
+                text = '\\textsc{{{tracer}}}\n$\\chi2 / \mathrm{{ndof}} = {chi2:.0f} / ({nd:d} - {np:d}) = {rchi2:.2f}$'.format(tracer=ttracer, chi2=chi2, nd=nd, np=nparams, rchi2=chi2 / (nd - nparams))
+                text = '\\textsc{{{tracer}}}\n$\\chi2 / \mathrm{{ndof}} = {rchi2:.2f}$'.format(tracer=ttracer, chi2=chi2, nd=nd, np=nparams, rchi2=chi2 / (nd - nparams))
+                ax.text(0.8, 0.95, text,
+                        horizontalalignment='center',
+                        verticalalignment='top',
+                        transform=ax.transAxes,
+                        fontsize=16, color=color)
+                """
+                text = {'LRG-z0': 'LRG1', 'LRG-z1': 'LRG2', 'LRG-z2': 'LRG3'}.get(tracer, tracer)
+                ax.text(0.9, 0.95, text,
+                        horizontalalignment='center',
+                        verticalalignment='top',
+                        transform=ax.transAxes,
+                        fontsize=16, color=color)
+                plt.savefig(fn, bbox_inches='tight', dpi=360)
+
+            fn = outdir / 'pk_fs_{}_{}.{}'.format(tracer, covsyst, ext)
+            plot(fn)
+
+
 
 # ============================================================================
 # CLI
@@ -457,7 +711,7 @@ def main():
             "mu0",
             value=0.0,
             fixed=args.force_GR,
-            prior=None if args.force_GR else {"dist": "uniform", "limits": (-3.0, 3.0)},
+            prior=None if args.force_GR else {"dist": "uniform", "limits": (-3.0, 1.0)},
             ref=None if args.force_GR else {"dist": "norm", "loc": 0.0, "scale": 0.01},
             delta=None if args.force_GR else 0.25,
         )
@@ -681,6 +935,13 @@ def main():
         covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
         lk = ObservablesGaussianLikelihood(observables=[observable], covariance=covariance, name=namespace)
+
+        for param in lk.all_params.select(basename=['alpha*', 'sn*', 'c*']):
+            if param.varied: param.update(derived='.auto_not_derived')
+
+        if lk.mpicomm.rank == 0:
+            lk.log_info('Use analytic marginalization for {}.'.format(lk.all_params.names(solved=True)))
+        
         likelihoods.append(lk)
 
         if rank == 0:
@@ -691,6 +952,10 @@ def main():
         comm.Barrier()
         if rank == 0:
             print("[Emulator] Done. Exiting because --create-emu was set.")
+        return
+
+    if args.mode == 'plot_spectrum':
+        plot_spectrum(likelihoods)
         return
 
     likelihood = sum(likelihoods)
