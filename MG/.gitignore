@@ -1,0 +1,5 @@
+chains/
+plots*/
+*.sh
+*.yaml
+*.log
