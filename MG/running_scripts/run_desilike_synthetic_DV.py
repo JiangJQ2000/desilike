@@ -373,7 +373,7 @@ def main():
     # ---------- Build prefix (similar spirit to OLD script) ----------
     prefix = args.chain_prefix
     prefix += "_beds" if args.beyond_eds else "_eds"
-    if args.use_emu:
+    if args.use_emu or args.importance:
         prefix += "_emu"
     prefix += f"_{args.freedom}_{prior_basis}_{fid_model}"
     if args.mg_variant == "binning":
@@ -414,8 +414,8 @@ def main():
         cosmo.init.params["m_ncdm"].update(fixed=True, value=0.06)
 
     # Optional external priors (OLD)
-    ns_prior = None if args.skip_ns_prior else {"dist": "norm", "loc": 0.9649, "scale": 0.02}
-    bbn_prior = None if args.skip_bbn_prior else {"dist": "norm", "loc": 0.02237, "scale": 0.00055}
+    ns_prior = None if args.skip_ns_prior else {"dist": "norm", "loc": 0.9649, "scale": 0.042}
+    bbn_prior = None if args.skip_bbn_prior else {"dist": "norm", "loc": 0.02218, "scale": 0.00055}
 
     if ns_prior is not None and "n_s" in cosmo.init.params:
         cosmo.init.params["n_s"].update(
@@ -457,7 +457,7 @@ def main():
             "mu0",
             value=0.0,
             fixed=args.force_GR,
-            prior=None if args.force_GR else {"dist": "uniform", "limits": (-3.0, 3.0)},
+            prior=None if args.force_GR else {"dist": "uniform", "limits": (-3.0, 1.0)},
             ref=None if args.force_GR else {"dist": "norm", "loc": 0.0, "scale": 0.01},
             delta=None if args.force_GR else 0.25,
         )
@@ -633,6 +633,11 @@ def main():
 
         for par in theory.params.select(basename=[pname(nm) for nm in nuis_to_namespace]):
             par.update(namespace=namespace)
+        
+        for param in theory.init.params:
+            # Update latex just to have better labels
+            param.update(namespace='pre_{}'.format(namespace),
+                            latex=param.latex(namespace=r'\mathrm{{pre}}, \mathrm{{{}}}, {:d}'.format(tracer_label, iz), inline=False))
 
         # -----------------------------
         # Observable + covariance
@@ -681,6 +686,13 @@ def main():
         covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
         lk = ObservablesGaussianLikelihood(observables=[observable], covariance=covariance, name=namespace)
+
+        for param in lk.all_params.select(basename=['alpha*', 'sn*', 'c*']):
+            if param.varied: param.update(derived='.auto_not_derived')
+
+        if lk.mpicomm.rank == 0:
+            lk.log_info('Use analytic marginalization for {}.'.format(lk.all_params.names(solved=True)))
+        
         likelihoods.append(lk)
 
         if rank == 0:
