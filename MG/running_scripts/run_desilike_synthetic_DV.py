@@ -180,6 +180,7 @@ def parse_args():
         type=Path,
         default=Path("/home/users/jiangjq/projects/desi-y1-kp/desi_y1_cosmo_bindings/fs_bao_data"),
     )
+    p.add_argument("--bao-recon", action="store_true", help="+ (DR1) BAO")
     p.add_argument("--use-cov-x10", action="store_true")
     p.add_argument("--cov-scale", type=float, default=1.0)
 
@@ -358,7 +359,7 @@ def main():
     # From desi_fs_bao_all
     tracers = None
     klim = (0.02, 0.2)
-    observable_name = 'power'
+    observable_name = 'power+bao-recon' if args.bao_recon else 'power'
     data_name = ''
     covsyst='rotation-hod-photo'
 
@@ -538,51 +539,7 @@ def main():
     # Loop over tracers
     # -----------------------------
     for tracer, iz, zrange, namespace in this_zrange:
-        # ------- Y1 -------
-        if 'Lya' in tracer: continue
-        data = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name='', klim=klim)).observables(observables='power')
-        b1_fid, = get_fit_setup(tracer, zrange=zrange, return_list=['b1'])
-        b2_ref = 0. # Y1
-        z_eff = data.attrs['zeff']
         file_tag = namespace
-        
-        # -----------------------------
-        # Build template + theory
-        # -----------------------------
-        template = DirectPowerSpectrumTemplate(z=float(z_eff), fiducial=DESI(), cosmo=cosmo)
-
-        # for BZ_fR we still pass theory BZ (like your folps runner)
-        theory_variant = "BZ" if args.mg_variant == "BZ_fR" else args.mg_variant
-
-        theory = fkptjaxTracerPowerSpectrumMultipoles()
-
-        init_kwargs = dict(
-            freedom=args.freedom,
-            prior_basis=prior_basis,
-            tracer=tracer,
-            template=template,
-            k=data.attrs['kin'],
-            ells=list(ells),
-            b3_coev=True,
-            model="HDKI",
-            mg_variant=theory_variant,
-            beyond_eds=bool(args.beyond_eds),
-            rescale_PS=RESCALE_PS,
-            shotnoise=1e4,
-            mock_type='Y1',
-        )
-        # Match OLD: APscaling passes h_fid, and nuisance mapping handled internally
-        if prior_basis == "APscaling":
-            init_kwargs["h_fid"] = float(h_fid_global) if h_fid_global is not None else float(args.h_fid)
-        # Keep b1_fid as a stable ref for your physical/folps usage (harmless for standard too)
-        init_kwargs["b1_fid"] = float(b1_fid)
-
-        init_kwargs['sigma8_ref'] = float(fid.sigma8_z(z_eff))
-        if MPI.COMM_WORLD.rank == 0:
-            print(f"{namespace}\t{z_eff=}\tsigma8_ref = {init_kwargs['sigma8_ref']}")
-
-        theory.init.update(**init_kwargs)
-
         # -----------------------------
         # Emulator (optional)
         # -----------------------------
@@ -597,95 +554,181 @@ def main():
             scale_bins_method=str(args.scale_bins_method),
         )
 
-        # -----------------------------
-        # Nuisance param namespacing + alpha analytic marginalization (MATCH OLD SCRIPT)
-        # -----------------------------
-        is_phys = bool(getattr(theory, "is_physical_prior", False))
-        suffix = "p" if is_phys else ""
+        tracer_label = get_tracer_label(tracer)
 
-        def pname(base: str) -> str:
-            return f"{base}{suffix}"
+        tracer_has_no_fs = 'Lya' in tracer_label
 
-        # alpha marg
-        alpha_bases = ["alpha0", "alpha2", "alpha4", "alpha0shot", "alpha2shot"]
-        for par in theory.params.select(basename=[pname(b) for b in alpha_bases]):
-            if par.varied:
-                par.update(derived=".marg")
+        observables = []
 
-        # Optional: set b1/b2 refs (kept from your folps script; does not change the basis mapping itself)
-        b1_name = pname("b1")
-        if b1_name in theory.params:
-            theory.params[b1_name].update(ref={"dist": "norm", "loc": float(b1_fid), "scale": 0.05})
+        if 'power' in observable_name and not tracer_has_no_fs:
+            data = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name='', klim=klim)).observables(observables='power')
+            b1_fid, = get_fit_setup(tracer, zrange=zrange, return_list=['b1'])
+            b2_ref = 0. # Y1
+            z_eff = data.attrs['zeff']
+            
+            # -----------------------------
+            # Build template + theory
+            # -----------------------------
+            template = DirectPowerSpectrumTemplate(z=float(z_eff), fiducial=DESI(), cosmo=cosmo)
 
-        b2_name = pname("b2")
-        if b2_name in theory.params:
-            theory.params[b2_name].update(ref={"dist": "norm", "loc": float(b2_ref), "scale": 0.1})
+            # for BZ_fR we still pass theory BZ (like your folps runner)
+            theory_variant = "BZ" if args.mg_variant == "BZ_fR" else args.mg_variant
 
-        nuis_to_namespace = [
-            "b1", "b2", "bs2", "b3nl",
-            "alpha0", "alpha2", "alpha4",
-            "alpha0shot", "alpha2shot",
-            "ctilde",
-            "PshotP",
-        ]
-        if prior_basis == "APscaling":
-            nuis_to_namespace += ["bK2", "btd"]
+            theory = fkptjaxTracerPowerSpectrumMultipoles()
 
-        for par in theory.params.select(basename=[pname(nm) for nm in nuis_to_namespace]):
-            par.update(namespace=namespace)
-        
-        for param in theory.init.params:
-            # Update latex just to have better labels
-            param.update(namespace='pre_{}'.format(namespace),
-                            latex=param.latex(namespace=r'\mathrm{{pre}}, \mathrm{{{}}}, {:d}'.format(tracer_label, iz), inline=False))
+            init_kwargs = dict(
+                freedom=args.freedom,
+                prior_basis=prior_basis,
+                tracer=tracer,
+                template=template,
+                k=data.attrs['kin'],
+                ells=list(ells),
+                b3_coev=True,
+                model="HDKI",
+                mg_variant=theory_variant,
+                beyond_eds=bool(args.beyond_eds),
+                rescale_PS=RESCALE_PS,
+                shotnoise=1e4,
+                mock_type='Y1',
+            )
+            # Match OLD: APscaling passes h_fid, and nuisance mapping handled internally
+            if prior_basis == "APscaling":
+                init_kwargs["h_fid"] = float(h_fid_global) if h_fid_global is not None else float(args.h_fid)
+            # Keep b1_fid as a stable ref for your physical/folps usage (harmless for standard too)
+            init_kwargs["b1_fid"] = float(b1_fid)
 
-        # -----------------------------
-        # Observable + covariance
-        # -----------------------------
-        observable = TracerPowerSpectrumMultipolesObservable(
-            data=data,
-            theory=theory,
-            ells=list(ells),
-            wmatrix=data.attrs['wmatrix'], kin=data.attrs['kin'], ellsin=data.attrs['ellsin'], wshotnoise=data.attrs['wshotnoise'],
-        )
+            init_kwargs['sigma8_ref'] = float(fid.sigma8_z(z_eff))
+            if MPI.COMM_WORLD.rank == 0:
+                print(f"{namespace}\t{z_eff=}\tsigma8_ref = {init_kwargs['sigma8_ref']}")
 
-        # emu on observable.wmatrix.theory, following Y1 pipeline, otherwise ell range is incorrect.
-        if args.create_emu and rank == 0:
-            if emu_path.exists():
-                print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
-            else:
-                print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
-                theory = observable.wmatrix.theory
-                _ = theory.pt()  # force build
-                emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order), delta_scale=float(args.emu_scale))
-                emu = Emulator(theory.pt, engine=emu_engine)
-                emu.set_samples()
-                emu.fit()
-                emu.save(str(emu_path))
-                print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
+            theory.init.update(**init_kwargs)
 
-        if use_emu_runtime:
-            if args.importance:
-                pt_backups.append((theory, theory.pt))
+            # -----------------------------
+            # Nuisance param namespacing + alpha analytic marginalization (MATCH OLD SCRIPT)
+            # -----------------------------
+            is_phys = bool(getattr(theory, "is_physical_prior", False))
+            suffix = "p" if is_phys else ""
 
-            if rank == 0 and not emu_path.exists():
-                raise FileNotFoundError(f"[Emulator] Missing {emu_path} for {file_tag}. Run with --create-emu.")
-            comm.Barrier()
+            def pname(base: str) -> str:
+                return f"{base}{suffix}"
 
-            emu_loaded = EmulatedCalculator.load(str(emu_path))
+            # alpha marg
+            alpha_bases = ["alpha0", "alpha2", "alpha4", "alpha0shot", "alpha2shot"]
+            for par in theory.params.select(basename=[pname(b) for b in alpha_bases]):
+                if par.varied:
+                    par.update(derived=".marg")
 
-            # important: share cosmology params into emulator init (as you did before)
-            for p in cosmo.init.params:
-                if p in emu_loaded.init.params:
-                    emu_loaded.init.params.set(p)
+            # Optional: set b1/b2 refs (kept from your folps script; does not change the basis mapping itself)
+            b1_name = pname("b1")
+            if b1_name in theory.params:
+                theory.params[b1_name].update(ref={"dist": "norm", "loc": float(b1_fid), "scale": 0.05})
 
-            theory.init.update(pt=emu_loaded)
-            if rank == 0:
-                print(f"[{file_tag}] PT backend:", type(theory.pt).__name__)
+            b2_name = pname("b2")
+            if b2_name in theory.params:
+                theory.params[b2_name].update(ref={"dist": "norm", "loc": float(b2_ref), "scale": 0.1})
+
+            nuis_to_namespace = [
+                "b1", "b2", "bs2", "b3nl",
+                "alpha0", "alpha2", "alpha4",
+                "alpha0shot", "alpha2shot",
+                "ctilde",
+                "PshotP",
+            ]
+            if prior_basis == "APscaling":
+                nuis_to_namespace += ["bK2", "btd"]
+
+            for par in theory.params.select(basename=[pname(nm) for nm in nuis_to_namespace]):
+                par.update(namespace=namespace)
+            
+            for param in theory.init.params:
+                # Update latex just to have better labels
+                param.update(namespace='pre_{}'.format(namespace),
+                                latex=param.latex(namespace=r'\mathrm{{pre}}, \mathrm{{{}}}, {:d}'.format(tracer_label, iz), inline=False))
+
+            # -----------------------------
+            # Observable + covariance
+            # -----------------------------
+            observable = TracerPowerSpectrumMultipolesObservable(
+                data=data,
+                theory=theory,
+                ells=list(ells),
+                wmatrix=data.attrs['wmatrix'], kin=data.attrs['kin'], ellsin=data.attrs['ellsin'], wshotnoise=data.attrs['wshotnoise'],
+            )
+
+            # emu on observable.wmatrix.theory, following Y1 pipeline, otherwise ell range is incorrect.
+            if args.create_emu and rank == 0:
+                if emu_path.exists():
+                    print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
+                else:
+                    print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
+                    theory = observable.wmatrix.theory
+                    _ = theory.pt()  # force build
+                    emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order), delta_scale=float(args.emu_scale))
+                    emu = Emulator(theory.pt, engine=emu_engine)
+                    emu.set_samples()
+                    emu.fit()
+                    emu.save(str(emu_path))
+                    print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
+
+            if use_emu_runtime:
+                if args.importance:
+                    pt_backups.append((theory, theory.pt))
+
+                if rank == 0 and not emu_path.exists():
+                    raise FileNotFoundError(f"[Emulator] Missing {emu_path} for {file_tag}. Run with --create-emu.")
+                comm.Barrier()
+
+                emu_loaded = EmulatedCalculator.load(str(emu_path))
+
+                # important: share cosmology params into emulator init (as you did before)
+                for p in cosmo.init.params:
+                    if p in emu_loaded.init.params:
+                        emu_loaded.init.params.set(p)
+
+                theory.init.update(pt=emu_loaded)
+                if rank == 0:
+                    print(f"[{file_tag}] PT backend:", type(theory.pt).__name__)
+            
+            observables.append(observable)
     
-        covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
-        lk = ObservablesGaussianLikelihood(observables=[observable], covariance=covariance, name=namespace)
+        if 'bao-recon' in observable_name:
+            from desilike.observables.galaxy_clustering import BAOCompressionObservable
+            forfit = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name='bao-recon' if tracer_has_no_fs else 'power+bao-recon', data_name=data_name, klim=klim)).select(observables='bao-recon', select_observables=True)
+            covariance, data = forfit.view(), forfit.observables()[0]
+            observable = BAOCompressionObservable(data=data.view(), covariance=covariance, cosmo=cosmo, quantities=data.projs, fiducial=fid, z=data.attrs['zeff'])
+            flatdata = observable.flatdata
+            emu_fn = emu_path.with_stem(emu_path.stem + '_bao_recon')
+            if args.create_emu:
+                if not emu_fn:
+                    raise ValueError('provide emulator_fn')
+                observable()
+                from desilike.emulators import Emulator, TaylorEmulatorEngine
+                temp = observable
+                temp.all_params.pop('sigma8_m', None)
+                for param in temp.all_params.select(basename=['logA', 'n_s']):
+                    param.update(fixed=True)
+                emulator = Emulator(observable, engine=TaylorEmulatorEngine(method='finite', order=int(args.emu_order), delta_scale=float(args.emu_scale)))
+                emulator.set_samples()
+                emulator.fit()
+                emulator.save(emu_fn)
+                observable = emulator.to_calculator()
+            elif use_emu_runtime: # Load emulator
+                calculator = EmulatedCalculator.load(emu_fn)
+                # Update emulator with cosmo
+                for param in cosmo.init.params:
+                    if param in calculator.init.params:
+                        calculator.init.params.set(param)
+                observable = calculator
+            observable.flatdata = flatdata
+            observables.append(observable)
+
+
+        covariance = None
+        if not tracer_has_no_fs and observable_name != 'bao-recon':
+            covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
+
+        lk = ObservablesGaussianLikelihood(observables=observables, covariance=covariance, name=namespace)
 
         for param in lk.all_params.select(basename=['alpha*', 'sn*', 'c*']):
             if param.varied: param.update(derived='.auto_not_derived')
