@@ -43,10 +43,10 @@ except Exception:
 from desilike.emulators import Emulator, EmulatedCalculator, TaylorEmulatorEngine
 
 try:
-    from desilike.theories.galaxy_clustering import fkptjaxTracerPowerSpectrumMultipoles
+    from desilike.theories.galaxy_clustering import fkptjaxTracerPowerSpectrumMultipoles, REPTVelocileptorsTracerPowerSpectrumMultipoles
 except Exception as exc:
     raise ImportError(
-        "Could not import fkptjaxTracerPowerSpectrumMultipoles from desilike.theories.galaxy_clustering.\n"
+        "Could not import from desilike.theories.galaxy_clustering.\n"
         "Make sure your branch/module exposes it there."
     ) from exc
 
@@ -124,6 +124,7 @@ def emu_filename(
     redshift_bins: bool,
     scale_bins: bool,
     mg_variant: str,
+    theory_name: str,
     kc: float | None = None,
     scale_bins_method: str | None = None,
 ) -> str:
@@ -147,7 +148,7 @@ def emu_filename(
         mode = "eds_" + mode
 
     return (
-        f"emu-fs_isitgr_fkptjax_folps_{mode}_{tag}"
+        f"emu-fs_isitgr_{theory_name}_{mode}_{tag}"
         f"_l{''.join(map(str, ells))}.npy"
     )
 
@@ -173,7 +174,7 @@ def parse_args():
     p.add_argument("--emu-scale", type=float, default=1.0, help="Taylor emulator scale (finite).")
 
     p.add_argument("--chains-dir", type=Path, default=Path("./chains"))
-    p.add_argument("--chain-prefix", type=str, default="chain_fs_folps_isitgr_fkptjax")
+    p.add_argument("--chain-prefix", type=str, required=True)
 
     p.add_argument(
         "--data-dir",
@@ -191,6 +192,11 @@ def parse_args():
     p.add_argument("--freedom", choices=["max", "min"], default="max")
     p.add_argument("--fid-model", type=str, default="LCDM", help="Required (e.g. LCDM, HS_F4, ...).")
 
+    p.add_argument(
+        "--theory-name",
+        choices=["fkptjax_folps", "reptvelocileptors"],
+        default="fkptjax_folps",
+    )
     # IMPORTANT: match OLD script basis behavior
     p.add_argument(
         "--prior-basis",
@@ -216,6 +222,11 @@ def parse_args():
     p.add_argument("--kc", type=float, default=0.1)
 
     # running
+    p.add_argument(
+        "--solve",
+        choices=[".marg", ".marg_not_derived"],
+        default=".marg",
+    )
     p.add_argument("--resume", action="store_true")
     p.add_argument("--ref-scale", type=float, default=1.2)
 
@@ -534,6 +545,7 @@ def main():
     likelihoods = []
     pt_backups = []
     use_emu_runtime = args.use_emu and not args.importance
+    pt = None
 
     # -----------------------------
     # Loop over tracers
@@ -550,6 +562,7 @@ def main():
             redshift_bins=bool(args.redshift_bins),
             scale_bins=bool(args.scale_bins),
             mg_variant=str(args.mg_variant),
+            theory_name=args.theory_name,
             kc=float(args.kc),
             scale_bins_method=str(args.scale_bins_method),
         )
@@ -574,71 +587,91 @@ def main():
             # for BZ_fR we still pass theory BZ (like your folps runner)
             theory_variant = "BZ" if args.mg_variant == "BZ_fR" else args.mg_variant
 
-            theory = fkptjaxTracerPowerSpectrumMultipoles()
+            match args.theory_name:
+                case 'fkptjax_folps':
+                    theory = fkptjaxTracerPowerSpectrumMultipoles()
 
-            init_kwargs = dict(
-                freedom=args.freedom,
-                prior_basis=prior_basis,
-                tracer=tracer,
-                template=template,
-                k=data.attrs['kin'],
-                ells=list(ells),
-                b3_coev=True,
-                model="HDKI",
-                mg_variant=theory_variant,
-                beyond_eds=bool(args.beyond_eds),
-                rescale_PS=RESCALE_PS,
-                shotnoise=1e4,
-                mock_type='Y1',
-            )
-            # Match OLD: APscaling passes h_fid, and nuisance mapping handled internally
-            if prior_basis == "APscaling":
-                init_kwargs["h_fid"] = float(h_fid_global) if h_fid_global is not None else float(args.h_fid)
-            # Keep b1_fid as a stable ref for your physical/folps usage (harmless for standard too)
-            init_kwargs["b1_fid"] = float(b1_fid)
+                    init_kwargs = dict(
+                        freedom=args.freedom,
+                        prior_basis=prior_basis,
+                        tracer=tracer,
+                        template=template,
+                        k=data.attrs['kin'],
+                        ells=list(ells),
+                        b3_coev=True,
+                        model="HDKI",
+                        mg_variant=theory_variant,
+                        beyond_eds=bool(args.beyond_eds),
+                        rescale_PS=RESCALE_PS,
+                        shotnoise=1e4,
+                        mock_type='Y1',
+                    )
+                    # Match OLD: APscaling passes h_fid, and nuisance mapping handled internally
+                    if prior_basis == "APscaling":
+                        init_kwargs["h_fid"] = float(h_fid_global) if h_fid_global is not None else float(args.h_fid)
+                    # Keep b1_fid as a stable ref for your physical/folps usage (harmless for standard too)
+                    init_kwargs["b1_fid"] = float(b1_fid)
 
-            init_kwargs['sigma8_ref'] = float(fid.sigma8_z(z_eff))
-            if MPI.COMM_WORLD.rank == 0:
-                print(f"{namespace}\t{z_eff=}\tsigma8_ref = {init_kwargs['sigma8_ref']}")
+                    init_kwargs['sigma8_ref'] = float(fid.sigma8_z(z_eff))
+                    if MPI.COMM_WORLD.rank == 0:
+                        print(f"{namespace}\t{z_eff=}\tsigma8_ref = {init_kwargs['sigma8_ref']}")
 
-            theory.init.update(**init_kwargs)
+                    theory.init.update(**init_kwargs)
 
-            # -----------------------------
-            # Nuisance param namespacing + alpha analytic marginalization (MATCH OLD SCRIPT)
-            # -----------------------------
-            is_phys = bool(getattr(theory, "is_physical_prior", False))
-            suffix = "p" if is_phys else ""
+                    # -----------------------------
+                    # Nuisance param namespacing + alpha analytic marginalization (MATCH OLD SCRIPT)
+                    # -----------------------------
+                    is_phys = bool(getattr(theory, "is_physical_prior", False))
+                    suffix = "p" if is_phys else ""
 
-            def pname(base: str) -> str:
-                return f"{base}{suffix}"
+                    def pname(base: str) -> str:
+                        return f"{base}{suffix}"
 
-            # alpha marg
-            alpha_bases = ["alpha0", "alpha2", "alpha4", "alpha0shot", "alpha2shot"]
-            for par in theory.params.select(basename=[pname(b) for b in alpha_bases]):
-                if par.varied:
-                    par.update(derived=".marg")
+                    # alpha marg
+                    alpha_bases = ["alpha0", "alpha2", "alpha4", "alpha0shot", "alpha2shot"]
+                    for par in theory.params.select(basename=[pname(b) for b in alpha_bases]):
+                        if par.varied:
+                            par.update(derived=".marg")
 
-            # Optional: set b1/b2 refs (kept from your folps script; does not change the basis mapping itself)
-            b1_name = pname("b1")
-            if b1_name in theory.params:
-                theory.params[b1_name].update(ref={"dist": "norm", "loc": float(b1_fid), "scale": 0.05})
+                    # Optional: set b1/b2 refs (kept from your folps script; does not change the basis mapping itself)
+                    b1_name = pname("b1")
+                    if b1_name in theory.params:
+                        theory.params[b1_name].update(ref={"dist": "norm", "loc": float(b1_fid), "scale": 0.05})
 
-            b2_name = pname("b2")
-            if b2_name in theory.params:
-                theory.params[b2_name].update(ref={"dist": "norm", "loc": float(b2_ref), "scale": 0.1})
+                    b2_name = pname("b2")
+                    if b2_name in theory.params:
+                        theory.params[b2_name].update(ref={"dist": "norm", "loc": float(b2_ref), "scale": 0.1})
 
-            nuis_to_namespace = [
-                "b1", "b2", "bs2", "b3nl",
-                "alpha0", "alpha2", "alpha4",
-                "alpha0shot", "alpha2shot",
-                "ctilde",
-                "PshotP",
-            ]
-            if prior_basis == "APscaling":
-                nuis_to_namespace += ["bK2", "btd"]
+                    nuis_to_namespace = [
+                        "b1", "b2", "bs2", "b3nl",
+                        "alpha0", "alpha2", "alpha4",
+                        "alpha0shot", "alpha2shot",
+                        "ctilde",
+                        "PshotP",
+                    ]
+                    if prior_basis == "APscaling":
+                        nuis_to_namespace += ["bK2", "btd"]
 
-            for par in theory.params.select(basename=[pname(nm) for nm in nuis_to_namespace]):
-                par.update(namespace=namespace)
+                    for par in theory.params.select(basename=[pname(nm) for nm in nuis_to_namespace]):
+                        par.update(namespace=namespace)
+                case 'reptvelocileptors':
+                    theory = REPTVelocileptorsTracerPowerSpectrumMultipoles(freedom=args.freedom, prior_basis=prior_basis, tracer=tracer_label)
+                    # nuisance parameters
+                    for order in [4, 2]:
+                        if order not in data.projs:
+                            for param in theory.init.params.select(basename=['al{:d}*_*'.format(order), 'bl{:d}*_*'.format(order), 'alpha{:d}*'.format(order), 'sn{:d}*'.format(order)]): param.update(fixed=True)
+                    theory.init.update(template=template)
+                    if 'REPTVelocileptors' in theory.__class__.__name__ and (not args.create_emu) and (not use_emu_runtime) and (len(this_zrange) > 1):  # share same perturbation theory
+                        theory.init.update(pt=pt, z=data.attrs['zeff'])
+                        pt = theory.pt
+                        theory.init.update(pt=pt)
+                    if 'b1p' in theory.init.params:  # physical
+                        b1p = b1_fid * fid.sigma8_z(data.attrs['zeff'])
+                        theory.init.params['b1p'].update(value=b1p, ref=dict(dist='norm', loc=b1p, scale=0.1))
+                    else:
+                        theory.init.params['b1'].update(value=b1_fid, ref=dict(dist='norm', loc=b1_fid, scale=0.1))
+                case _:
+                    raise NotImplementedError(args.theory_name)
             
             for param in theory.init.params:
                 # Update latex just to have better labels
@@ -656,11 +689,13 @@ def main():
             )
 
             # emu on observable.wmatrix.theory, following Y1 pipeline, otherwise ell range is incorrect.
-            if args.create_emu and rank == 0:
+            if args.create_emu:
                 if emu_path.exists():
-                    print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
+                    if rank == 0:
+                        print(f"[Emulator] ({file_tag}) exists → {emu_path.name}")
                 else:
-                    print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
+                    if rank == 0:
+                        print(f"[Emulator] ({file_tag}) fitting Taylor emulator (finite, order={args.emu_order})…")
                     theory = observable.wmatrix.theory
                     _ = theory.pt()  # force build
                     emu_engine = TaylorEmulatorEngine(method="finite", order=int(args.emu_order), delta_scale=float(args.emu_scale))
@@ -668,7 +703,10 @@ def main():
                     emu.set_samples()
                     emu.fit()
                     emu.save(str(emu_path))
-                    print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
+                    if rank == 0:
+                        print(f"[Emulator] ({file_tag}) saved → {emu_path.name}")
+            if args.create_emu:
+                comm.Barrier()
 
             if use_emu_runtime:
                 if args.importance:
@@ -703,7 +741,6 @@ def main():
                 if not emu_fn:
                     raise ValueError('provide emulator_fn')
                 observable()
-                from desilike.emulators import Emulator, TaylorEmulatorEngine
                 temp = observable
                 temp.all_params.pop('sigma8_m', None)
                 for param in temp.all_params.select(basename=['logA', 'n_s']):
@@ -720,21 +757,22 @@ def main():
                     if param in calculator.init.params:
                         calculator.init.params.set(param)
                 observable = calculator
+            if args.create_emu:
+                comm.Barrier()
             observable.flatdata = flatdata
             observables.append(observable)
 
+
+        if args.create_emu:
+            # In create-only mode, avoid pipeline/likelihood initialization (it triggers MPI collectives).
+            comm.Barrier()
+            continue
 
         covariance = None
         if not tracer_has_no_fs and observable_name != 'bao-recon':
             covariance = ObservableCovariance.load(dataset_fn(tracer, zrange, observable_name=observable_name, data_name=data_name, klim=klim, covsyst=covsyst))
 
         lk = ObservablesGaussianLikelihood(observables=observables, covariance=covariance, name=namespace)
-
-        for param in lk.all_params.select(basename=['alpha*', 'sn*', 'c*']):
-            if param.varied: param.update(derived='.auto_not_derived')
-
-        if lk.mpicomm.rank == 0:
-            lk.log_info('Use analytic marginalization for {}.'.format(lk.all_params.names(solved=True)))
         
         likelihoods.append(lk)
 
@@ -749,6 +787,14 @@ def main():
         return
 
     likelihood = sum(likelihoods)
+
+    for param in likelihood.all_params.select(basename=['alpha*', 'sn*', 'c*']):
+        if param.varied:
+            param.update(derived=args.solve)
+
+    if likelihood.mpicomm.rank == 0:
+        likelihood.log_info('Use analytic marginalization for {}.'.format(likelihood.all_params.names(solved=True)))
+
 
     # -----------------------------
     # Importance sampling only (optional)
