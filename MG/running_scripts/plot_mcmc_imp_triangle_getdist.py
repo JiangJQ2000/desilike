@@ -17,7 +17,7 @@ from getdist.mcsamples import MCSamples
 BURNIN = 0.3
 ROOT = Path(__file__).resolve().parent
 OUT_FIG = ROOT / "chains" / "triangle_cosmo_mu_7cases_getdist.pdf"
-COBAYA_SIGMA0_ABS_MAX = 0.01
+COBAYA_SIGMA0_ABS_MAX = 0.1
 COBAYA_MUSIGMA_DIR = (
     Path.home()
     / "projects"
@@ -94,6 +94,26 @@ CASES = [
             / "chains"
             / "DR1_w_bao_recon_OmDE_mu0prior"
             / "mcmc_beds_emu_max_physical_velocileptors_Y1_mu0_l02_data-Y1_imp_*.npy"
+        ),
+    ),
+    ChainCase(
+        tag="10",
+        label="Y1 FS+BAO fkpt (physical_velocileptors), DR1 ns&BBN prior, IS ④ → w/o emu & EdS",
+        pattern=str(
+            ROOT
+            / "chains"
+            / "DR1_w_bao_recon_OmDE_mu0prior"
+            / "mcmc_eds_emu_max_physical_velocileptors_Y1_mu0_l02_data-Y1_imp_*.npy"
+        ),
+    ),
+    ChainCase(
+        tag="11",
+        label="Y1 FS+BAO fkpt (physical_velocileptors), DR1 ns&BBN prior, IS ④ → w/o emu & EdS & fix4",
+        pattern=str(
+            ROOT
+            / "chains"
+            / "DR1_w_bao_recon_OmDE_mu0prior_fix4"
+            / "mcmc_eds_emu_max_physical_velocileptors_Y1_mu0_l02_data-Y1_imp_*.npy"
         ),
     ),
     # ChainCase(
