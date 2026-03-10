@@ -682,13 +682,13 @@ def main():
         cosmo.init.params["tau_reio"].update(fixed=True)
 
     if "N_eff" in cosmo.init.params:
-        cosmo.init.params["N_eff"].update(fixed=True, value=3.046)
+        cosmo.init.params["N_eff"].update(fixed=True, value=3.044)
     if "m_ncdm" in cosmo.init.params:
         cosmo.init.params["m_ncdm"].update(fixed=True, value=0.06)
 
     # Optional external priors (OLD)
     ns_prior = None if args.skip_ns_prior else {"dist": "norm", "loc": 0.9649, "scale": 0.042}
-    bbn_prior = None if args.skip_bbn_prior else {"dist": "norm", "loc": 0.02218, "scale": 0.00055}
+    bbn_prior = None if args.skip_bbn_prior else {"dist": "norm", "loc": 0.02198, "scale": 0.00053}
 
     if ns_prior is not None and "n_s" in cosmo.init.params:
         cosmo.init.params["n_s"].update(
@@ -706,7 +706,7 @@ def main():
         )
 
     # Wide uniforms + refs (OLD)
-    prior_limits = {"h": (0.4, 1.0), "omega_cdm": (0.001, 0.99), "logA": (1.61, 3.91)}
+    prior_limits = {"h": (0.2, 1.0), "omega_cdm": (0.001, 0.99), "logA": (1.61, 3.91)}
     for name, scale, delta in [("h", 0.001, 0.03), ("omega_cdm", 0.001, 0.007), ("logA", 0.001, 0.05)]:
         if name in cosmo.init.params:
             par = cosmo.init.params[name]
@@ -1047,6 +1047,11 @@ def main():
 
     likelihood = sum(likelihoods)
 
+    if args.prior_basis == 'physical_velocileptors':
+        for param in likelihood.all_params.select(basename=['*4p']):
+            if likelihood.mpicomm.rank == 0:
+                print(f'Fix {param} = 0')
+            param.update(value=0., fixed=True)
     for param in likelihood.all_params.select(basename=['alpha*', 'sn*', 'c*']):
         if param.varied:
             param.update(derived=args.solve)
