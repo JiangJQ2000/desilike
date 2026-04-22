@@ -674,7 +674,10 @@ def main():
         engine="isitgr",
         redshift_bins=args.redshift_bins,
         scale_bins=args.scale_bins,
-        scale_bins_method=args.scale_bins_method,
+        MG_parameterization='muSigma',
+        use_BZ_form=False,
+        use_growth_index=None,
+        damping_yukawa=False,
     )
 
     # Fix / set values like OLD
